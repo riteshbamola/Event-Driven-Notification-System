@@ -4,6 +4,12 @@ import { randomUUID } from "crypto";
 const STREAM_NAME = "notifications-stream";
 const GROUP_NAME = "notifications-group";
 
+async function checkPending(redisClient) {
+  const pending = await redisClient.xPending(STREAM_NAME, GROUP_NAME);
+
+  console.log("📊 Pending Info:", pending);
+}
+
 async function publishTestEvent(redisClient) {
   const event = {
     eventId: randomUUID(),
@@ -102,6 +108,8 @@ async function startServer() {
     await publishTestEvent(redisClient);
 
     await startWorker(redisClient);
+
+    await checkPending(redisClient);
 
     console.log("🚀 Notification Service Started");
   } catch (error) {
