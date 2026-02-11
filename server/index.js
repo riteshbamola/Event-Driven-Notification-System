@@ -4,6 +4,27 @@ import { randomUUID } from "crypto";
 const STREAM_NAME = "notifications-stream";
 const GROUP_NAME = "notifications-group";
 
+async function reclaimStuckMessages(redisClient, consumerName) {
+  const MIN_IDLE_TIME = 10000; // 10 seconds
+
+  const result = await redisClient.xAutoClaim(
+    STREAM_NAME,
+    GROUP_NAME,
+    consumerName,
+    MIN_IDLE_TIME,
+    "0-0",
+    { COUNT: 10 },
+  );
+
+  const messages = result.messages;
+
+  if (messages.length > 0) {
+    console.log("Reclaimed stuck messages:", messages.length);
+  }
+
+  return messages;
+}
+
 async function checkPending(redisClient) {
   const pending = await redisClient.xPending(STREAM_NAME, GROUP_NAME);
 
@@ -27,6 +48,26 @@ async function publishTestEvent(redisClient) {
 async function startWorker(redisClient) {
   const CONSUMER_NAME = "Worker-1";
   console.log("Worker Started");
+
+  const reclaimedMessage = await reclaimStuckMessages(
+    redisClient,
+    CONSUMER_NAME,
+  );
+
+  for (const message of reclaimedMessage) {
+    console.log("Processing reclaimed message:", message);
+
+    try {
+      const success = Math.random() > 0.3;
+
+      if (!success) throw new Error("Retry failed");
+
+      await redisClient.xAck(STREAM_NAME, GROUP_NAME, message.id);
+      console.log("✅ Reclaimed message acknowledged:", message.id);
+    } catch (err) {
+      console.error("❌ Reclaimed processing failed");
+    }
+  }
 
   while (true) {
     try {
