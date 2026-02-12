@@ -135,34 +135,6 @@ Redis connection is configured in `server/config/redis.js` (default: `redis://lo
 
 ---
 
-## Project Structure
-
-```
-Event Driven Notification System/
-├── .gitignore
-├── README.md
-└── server/
-    ├── config/
-    │   └── redis.js           # Redis client setup
-    ├── constants/
-    │   └── streamConstants.js # Stream names, group, retry limits
-    ├── producer/
-    │   └── producer.js        # Event publishing logic
-    ├── setup/
-    │   └── initStream.js      # Consumer group creation
-    ├── utils/
-    │   ├── backoff.js         # Exponential backoff calculation
-    │   └── logger.js          # (Reserved for logging)
-    ├── workers/
-    │   ├── notificationWorker.js  # Main consumer & processor
-    │   └── retryWorker.js         # Re-injects messages from retry queue
-    ├── index.js               # Main entry (all-in-one)
-    ├── notificationRunner.js  # Notification worker only
-    ├── producerRunner.js      # Producer only (one-shot)
-    ├── retryRunner.js         # Retry worker only
-    └── package.json
-```
-
 ---
 
 ## Components
@@ -255,34 +227,6 @@ npm run worker:retry
 cd server
 npm run producer
 ```
-
-### NPM Scripts
-
-| Script | Command | Description |
-|--------|---------|-------------|
-| `start` | `nodemon index.js` | All components in one process |
-| `worker:notification` | `node notificationRunner.js` | Notification worker only |
-| `worker:retry` | `node retryRunner.js` | Retry worker only |
-| `producer` | `node producerRunner.js` | Publish one test event and exit |
-
----
-
-
----
-
-## Environment Variables
-
-For production, consider externalizing:
-
-| Variable | Example | Description |
-|----------|---------|-------------|
-| `REDIS_URL` | `redis://localhost:6379` | Redis connection URL |
-| `MAX_RETRIES` | `5` | Max retries before DLQ |
-| `MIN_IDLE_TIME` | `10000` | Idle ms before reclaiming (notification worker) |
-
-Update `config/redis.js` and `streamConstants.js` to read from `process.env` when needed.
-
----
 
 ## Extending the System
 
