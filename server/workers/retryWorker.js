@@ -25,17 +25,18 @@ export async function retryWorker(redisClient) {
         RETRY_QUEUE,
         0,
         now,
+        { LIMIT: { offset: 0, count: 10 } },
       );
 
       for (const raw of readyMessages) {
-        const message = JSON.parse(raw);
+        const removed = await redisClient.zRem(RETRY_QUEUE, raw);
 
-        await redisClient.xAdd(STREAM_NAME, "*", message);
-        await redisClient.zRem(RETRY_QUEUE, raw);
-
-        console.log("🔄 Re-added message to stream");
+        if (removed === 1) {
+          const message = JSON.parse(raw);
+          await redisClient.xAdd(STREAM_NAME, "*", message);
+          console.log("🔄 Re-added message safely");
+        }
       }
-      await new Promise((res) => setTimeout(res, 1000));
     } catch (error) {
       console.error("⚠️ Retry worker error:", error);
     }

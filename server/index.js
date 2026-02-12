@@ -10,8 +10,8 @@ async function startServer() {
   await connectRedis();
   await initStream(redisClient);
   await publishTestEvent(redisClient);
-  await retryWorker(redisClient);
   await notificationWorker(redisClient);
+  await retryWorker(redisClient);
 }
 
 startServer();

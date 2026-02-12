@@ -8,6 +8,8 @@ import {
 
 import { calculateBackoff } from "../utils/backoff.js";
 
+// Reclaiming Stuck Messages
+
 async function reclaimStuckMessages(redisClient, consumerName) {
   const MIN_IDLE_TIME = 10000; // 10 seconds
 
@@ -29,10 +31,47 @@ async function reclaimStuckMessages(redisClient, consumerName) {
   return messages;
 }
 
+//retry logic
+
+async function retryFunction(redisClient, message) {
+  const data = message.message;
+  const retryCount = parseInt(data.retryCount || "0");
+  if (retryCount < MAX_RETRIES) {
+    const updatedData = {
+      ...data,
+      retryCount: String(retryCount + 1),
+    };
+
+    const delay = calculateBackoff(retryCount);
+    const retryAt = Date.now() + delay;
+
+    await redisClient.zAdd(RETRY_QUEUE, {
+      score: retryAt,
+      value: JSON.stringify(updatedData),
+    });
+
+    console.log(`⏳ Retry scheduled in ${delay}ms`);
+  } else {
+    await redisClient.xAdd(DLQ_STREAM, "*", data);
+    console.log("🚨 Moved to DLQ:", message.id);
+  }
+}
+
+// processing reclaimed messages
+
 async function processReclaimedMessages(redisClient, reclaimedMessages) {
   for (const message of reclaimedMessages) {
     const data = message.message;
-    const retryCount = parseInt(data.retryCount || "0");
+
+    const lockKey = `processed:${data.eventId}`;
+    const processingKey = `processing:${data.eventId}`;
+    const alreadyProcessed = await redisClient.exists(lockKey);
+
+    if (alreadyProcessed) {
+      console.log("Event already processed ", data.eventId);
+      await redisClient.xAck(STREAM_NAME, GROUP_NAME, message.id);
+      continue;
+    }
 
     try {
       console.log("📥 Processing reclaimed:", message.id);
@@ -40,36 +79,29 @@ async function processReclaimedMessages(redisClient, reclaimedMessages) {
       const success = Math.random() > 0.3;
       if (!success) throw new Error("Reclaimed processing failed");
 
+      const lockAcquired = await redisClient.set(processingKey, "1", {
+        NX: true,
+        EX: 86400,
+      });
+
+      if (!lockAcquired) {
+        console.log("Duplicate skipped", data.eventId);
+        await redisClient.xAck(STREAM_NAME, GROUP_NAME, message.id);
+        continue;
+      }
+
       await redisClient.xAck(STREAM_NAME, GROUP_NAME, message.id);
       console.log("✅ Reclaimed message acknowledged:", message.id);
     } catch (error) {
       console.error("❌ Reclaimed processing failed:", message.id);
-
-      if (retryCount < MAX_RETRIES) {
-        const updatedData = {
-          ...data,
-          retryCount: String(retryCount + 1),
-        };
-
-        const delay = calculateBackoff(retryCount);
-        const retryAt = Date.now() + delay;
-
-        await redisClient.zAdd(RETRY_QUEUE, {
-          score: retryAt,
-          value: JSON.stringify(updatedData),
-        });
-
-        console.log(`⏳ Retry scheduled in ${delay}ms`);
-      } else {
-        await redisClient.xAdd(DLQ_STREAM, "*", data);
-        console.log("🚨 Moved to DLQ:", message.id);
-      }
-
-      // Always ACK original after scheduling retry or DLQ
+      await redisClient.del(processingKey);
+      await retryFunction(redisClient, message);
       await redisClient.xAck(STREAM_NAME, GROUP_NAME, message.id);
     }
   }
 }
+
+// main notification worker
 
 export async function notificationWorker(redisClient) {
   const CONSUMER_NAME = "Worker-1";
@@ -105,38 +137,54 @@ export async function notificationWorker(redisClient) {
         for (const message of stream.messages) {
           const data = message.message;
 
+          // processed key check
+
+          const lockKey = `processed:${data.eventId}`;
+          const processingKey = `processing:${data.eventId}`;
+
+          const alreadyProcessed = await redisClient.exists(lockKey);
+
+          if (alreadyProcessed) {
+            console.log("Event already processed ", data.eventId);
+            await redisClient.xAck(STREAM_NAME, GROUP_NAME, message.id);
+            continue;
+          }
+
           try {
             console.log("📥 Processing new message:", message.id);
 
             const success = Math.random() > 0.3;
             if (!success) throw new Error("Processing failed");
 
+            //processing key check   so that two workers dont aqquire single event locking current event
+
+            const lockAcquired = await redisClient.set(processingKey, "1", {
+              NX: true,
+              EX: 86400,
+            });
+
+            if (!lockAcquired) {
+              console.log("Duplicate skipped", data.eventId);
+              await redisClient.xAck(STREAM_NAME, GROUP_NAME, message.id);
+              continue;
+            }
+
+            //buisness logic
+            console.log("Event Processed:", data.eventId);
+
+            await redisClient.del(processingKey);
+
+            //processed key set
+            await redisClient.set(lockKey, "1", { EX: 86400 });
+
             await redisClient.xAck(STREAM_NAME, GROUP_NAME, message.id);
             console.log("✅ Message acknowledged:", message.id);
           } catch (error) {
             console.error("❌ Processing failed:", message.id);
 
-            const retryCount = parseInt(data.retryCount || "0");
+            await redisClient.del(processingKey);
 
-            if (retryCount < MAX_RETRIES) {
-              const updatedData = {
-                ...data,
-                retryCount: String(retryCount + 1),
-              };
-
-              const delay = calculateBackoff(retryCount);
-              const retryAt = Date.now() + delay;
-
-              await redisClient.zAdd(RETRY_QUEUE, {
-                score: retryAt,
-                value: JSON.stringify(updatedData),
-              });
-
-              console.log(`⏳ Retry scheduled in ${delay}ms`);
-            } else {
-              await redisClient.xAdd(DLQ_STREAM, "*", data);
-              console.log("🚨 Moved to DLQ:", message.id);
-            }
+            await retryFunction(redisClient, message);
 
             await redisClient.xAck(STREAM_NAME, GROUP_NAME, message.id);
           }
