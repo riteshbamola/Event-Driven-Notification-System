@@ -6,28 +6,7 @@ import {
   RETRY_QUEUE,
 } from "../constants/streamConstants.js";
 
-async function reclaimStuckMessages(redisClient, consumerName) {
-  const MIN_IDLE_TIME = 10000; // 10 seconds
-
-  const result = await redisClient.xAutoClaim(
-    STREAM_NAME,
-    GROUP_NAME,
-    consumerName,
-    MIN_IDLE_TIME,
-    "0-0",
-    { COUNT: 10 },
-  );
-
-  const messages = result.messages;
-
-  if (messages.length > 0) {
-    console.log("Reclaimed stuck messages:", messages.length);
-  } else {
-    console.log("No Reclaimed Messages");
-  }
-
-  return messages;
-}
+import { calculateBackoff } from "../utils/backoff.js";
 
 async function checkPending(redisClient) {
   const pending = await redisClient.xPending(STREAM_NAME, GROUP_NAME);
@@ -38,43 +17,27 @@ async function checkPending(redisClient) {
 export async function retryWorker(redisClient) {
   const CONSUMER_NAME = "Worker-1";
 
-  const reclaimedMessage = await reclaimStuckMessages(
-    redisClient,
-    CONSUMER_NAME,
-  );
-
-  if (reclaimedMessage <= 0) return;
-  console.log(" Retry Worker Started");
-
-  // Recaliming Message that are processed earlier
-  for (const message of reclaimedMessage) {
-    const data = message.message;
-    const retryCount = parseInt(data.retryCount);
+  while (true) {
     try {
-      console.log("Proccessing Reclaimed Message :", message.id);
-      const successRate = Math.random() > 0.3;
+      const now = Date.now();
 
-      if (!successRate) throw new Error("Retry Failed");
+      const readyMessages = await redisClient.zRangeByScore(
+        RETRY_QUEUE,
+        0,
+        now,
+      );
 
-      await redisClient.xAck(STREAM_NAME, GROUP_NAME, message.id);
-      console.log("✅ Reclaimed message acknowledged:", message.id);
-    } catch (error) {
-      console.error("❌ Reclaimed processing failed");
+      for (const raw of readyMessages) {
+        const message = JSON.parse(raw);
 
-      if (retryCount < MAX_RETRIES) {
-        console.log("Adding Message to Stream");
-        const updatedData = {
-          ...data,
-          retryCount: String(retryCount + 1),
-        };
-        await redisClient.xAdd(STREAM_NAME, "*", updatedData);
-        await redisClient.xAck(STREAM_NAME, GROUP_NAME, message.id);
+        await redisClient.xAdd(STREAM_NAME, "*", message);
+        await redisClient.zRem(RETRY_QUEUE, raw);
 
-        console.log("🔁 Message retried:", message.id);
-      } else {
-        await redisClient.xAdd(DLQ_STREAM, "*", data);
-        await redisClient.xAck(STREAM_NAME, GROUP_NAME, message.id);
+        console.log("🔄 Re-added message to stream");
       }
+      await new Promise((res) => setTimeout(res, 1000));
+    } catch (error) {
+      console.error("⚠️ Retry worker error:", error);
     }
   }
 }
