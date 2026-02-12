@@ -16,6 +16,7 @@ A resilient, event-driven notification system built with **Node.js** and **Redis
 - [Components](#components)
 - [Data Flow](#data-flow)
 - [Running the System](#running-the-system)
+- [Example: End-to-End Flow](#example-end-to-end-flow)
 - [Retry Logic](#retry-logic)
 - [Environment Variables](#environment-variables)
 - [Extending the System](#extending-the-system)
@@ -30,41 +31,9 @@ This system processes notification events (e.g., user registration, email notifi
 
 ## Architecture
 
-```
-┌─────────────┐     ┌─────────────────────┐     ┌──────────────────────┐
-│   Producer  │────▶│  notifications-     │────▶│  Notification Worker │
-│             │     │  stream (Redis)     │     │  (Consumer Group)     │
-└─────────────┘     └─────────────────────┘     └──────────┬───────────┘
-                                                           │
-                                    ┌──────────────────────┼──────────────────────┐
-                                    │                      │                      │
-                                    ▼                      ▼                      ▼
-                           ┌───────────────┐      ┌───────────────┐      ┌───────────────┐
-                           │  Success:     │      │  Failure:     │      │  Stuck:       │
-                           │  Ack & Mark   │      │  Retry Queue  │      │  Auto-claim   │
-                           │  Processed    │      │  (Sorted Set) │      │  & Reclaim    │
-                           └───────────────┘      └───────┬───────┘      └───────────────┘
-                                                         │
-                                                         ▼
-                                                ┌───────────────┐
-                                                │  Retry Worker │
-                                                │  Re-injects   │
-                                                │  after backoff│
-                                                └───────┬───────┘
-                                                        │
-                                                        ▼
-                                                ┌───────────────┐
-                                                │  Max retries  │
-                                                │  exceeded?    │
-                                                └───────┬───────┘
-                                                        │
-                                                        ▼
-                                                ┌───────────────┐
-                                                │  DLQ Stream   │
-                                                │  (Dead Letter │
-                                                │   Queue)      │
-                                                └───────────────┘
-```
+![Architecture Diagram](images/Architecture.png)
+
+The diagram above shows the end-to-end flow: the **Producer** publishes events to the **Notification Stream** (Redis Streams). The **Notification Worker** consumes events and, based on the outcome, either acks and marks them processed, sends failures to the **Retry Queue (Sorted Set / ZSET)**, or reclaims stuck messages. The **Retry Worker** re-injects failed events back into the stream after the backoff delay. Events that exceed the max retry count are sent to the **DLQ Stream**.
 
 ### Key Redis Data Structures
 
@@ -268,6 +237,42 @@ npm run producer
 | `worker:notification` | `node notificationRunner.js` | Notification worker only |
 | `worker:retry` | `node retryRunner.js` | Retry worker only |
 | `producer` | `node producerRunner.js` | Publish one test event and exit |
+
+---
+
+## Example: End-to-End Flow
+
+The following screenshots show a real run where events are published, one event fails and goes to the ZSET (retry queue), fails again with a 2-second backoff, and is eventually processed successfully.
+
+### 1. Producer – Publishing Events
+
+![Producer Logs](images/Producer%20Logs.png)
+
+The producer connects to Redis and publishes test events. Each run produces a unique event ID (e.g. `1770890442812-0`, `1770890446176-0`). These events are appended to the `notifications-stream`.
+
+### 2. Notification Worker – Processing, Failure, and Retry
+
+![Notification Logs](images/Notification%20Logs.png)
+
+The notification worker consumes events and processes them. In this run:
+
+- **First failure:** Message `1770890448970-0` is picked up but processing fails (`❌ Processing failed`). The event is sent to the **Retry Queue (ZSET)** with `Retry scheduled in 1000ms`.
+- **Second failure:** After about 1 second, the event returns (e.g. `1770890449974-0`) and fails again. The system schedules another retry: `Retry scheduled in 2000ms` (2 seconds).
+- **Success:** After the 2-second backoff, the event is re-injected and processed successfully, then acknowledged.
+
+This shows the **exponential backoff** (1s → 2s → 4s) and idempotency when the same logical event is retried.
+
+### 3. Retry Worker – Re-injecting Failed Messages
+
+![Retry Worker Logs](images/WorkerLogs.png)
+
+The retry worker continuously polls the ZSET (`notifications-retry-queue`). When an event’s scheduled time has passed, it:
+
+1. Retrieves it with `ZRANGEBYSCORE`
+2. Removes it from the ZSET with `ZREM`
+3. Re-adds it to the main stream with `XADD`
+
+Each `🔄 Re-added message safely` line corresponds to a failed event being put back into the stream for the notification worker to process again.
 
 ---
 
