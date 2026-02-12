@@ -4,24 +4,6 @@ A resilient, event-driven notification system built with **Node.js** and **Redis
 
 ---
 
-## Table of Contents
-
-- [Overview](#overview)
-- [Architecture](#architecture)
-- [Features](#features)
-- [Prerequisites](#prerequisites)
-- [Installation](#installation)
-- [Configuration](#configuration)
-- [Project Structure](#project-structure)
-- [Components](#components)
-- [Data Flow](#data-flow)
-- [Running the System](#running-the-system)
-- [Example: End-to-End Flow](#example-end-to-end-flow)
-- [Retry Logic](#retry-logic)
-- [Environment Variables](#environment-variables)
-- [Extending the System](#extending-the-system)
-
----
 
 ## Overview
 
@@ -32,8 +14,6 @@ This system processes notification events (e.g., user registration, email notifi
 ## Architecture
 
 ![Architecture Diagram](images/Architecture.png)
-
-The diagram above shows the end-to-end flow: the **Producer** publishes events to the **Notification Stream** (Redis Streams). The **Notification Worker** consumes events and, based on the outcome, either acks and marks them processed, sends failures to the **Retry Queue (Sorted Set / ZSET)**, or reclaims stuck messages. The **Retry Worker** re-injects failed events back into the stream after the backoff delay. Events that exceed the max retry count are sent to the **DLQ Stream**.
 
 ### Key Redis Data Structures
 
