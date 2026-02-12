@@ -20,6 +20,8 @@ async function reclaimStuckMessages(redisClient, consumerName) {
 
   if (messages.length > 0) {
     console.log("Reclaimed stuck messages:", messages.length);
+  } else {
+    console.log("No Reclaimed Messages");
   }
 
   return messages;
@@ -54,18 +56,35 @@ async function startWorker(redisClient) {
     CONSUMER_NAME,
   );
 
+  // Recaliming Message that are processed earlier
   for (const message of reclaimedMessage) {
-    console.log("Processing reclaimed message:", message);
-
+    const data = message.message;
+    const retryCount = parseInt(data.retryCount);
     try {
-      const success = Math.random() > 0.3;
+      console.log("Proccessing Reclaimed Message :", message.id);
+      const successRate = Math.random() > 0.3;
 
-      if (!success) throw new Error("Retry failed");
+      if (!successRate) throw new Error("Retry Failed");
 
       await redisClient.xAck(STREAM_NAME, GROUP_NAME, message.id);
       console.log("✅ Reclaimed message acknowledged:", message.id);
-    } catch (err) {
+    } catch (error) {
       console.error("❌ Reclaimed processing failed");
+
+      if (retryCount < 3) {
+        console.log("Adding Message to Stream");
+        const updatedData = {
+          ...data,
+          retryCount: String(retryCount + 1),
+        };
+        await redisClient.xAdd(STREAM_NAME, "*", updatedData);
+        await redisClient.xAck(STREAM_NAME, GROUP_NAME, message.id);
+
+        console.log("🔁 Message retried:", message.id);
+      } else {
+        await redisClient.xAdd("notifications-dlq", "*", data);
+        await redisClient.xAck(STREAM_NAME, GROUP_NAME, message.id);
+      }
     }
   }
 
@@ -96,7 +115,6 @@ async function startWorker(redisClient) {
           if (!success) {
             throw new Error("Notification failed");
           }
-
           await redisClient.xAck(STREAM_NAME, GROUP_NAME, message.id);
 
           console.log("✅ Message acknowledged:", message.id);
